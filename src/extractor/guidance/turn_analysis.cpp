@@ -79,6 +79,7 @@ TurnAnalysis::TurnAnalysis(const util::NodeBasedDynamicGraph &node_based_graph,
       validation_handler(intersection_generator,
                          node_based_graph,
                          coordinates,
+                         osm_node_ids,
                          name_table,
                          street_name_suffix_table),
       validate_intersections{validate_intersections_}

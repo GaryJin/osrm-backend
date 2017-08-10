@@ -4,11 +4,15 @@
 #include "extractor/guidance/intersection.hpp"
 #include "extractor/guidance/intersection_generator.hpp"
 #include "extractor/guidance/intersection_handler.hpp"
-#include "extractor/query_node.hpp"
+#include "extractor/packed_osm_ids.hpp"
 
+#include "util/coordinate.hpp"
 #include "util/name_table.hpp"
 #include "util/node_based_graph.hpp"
 
+#include <iostream>
+#include <sstream>
+#include <string>
 #include <vector>
 
 namespace osrm
@@ -21,17 +25,21 @@ namespace guidance
 // Runs sanity checks on intersections and dumps out suspicious ones.
 class ValidationHandler final : public IntersectionHandler
 {
+    const extractor::PackedOSMIDs &osm_node_ids;
+
   public:
     ValidationHandler(const IntersectionGenerator &intersection_generator,
                       const util::NodeBasedDynamicGraph &node_based_graph,
                       const std::vector<util::Coordinate> &coordinates,
+                      const extractor::PackedOSMIDs &osm_node_ids,
                       const util::NameTable &name_table,
                       const SuffixTable &street_name_suffix_table)
         : IntersectionHandler(node_based_graph,
                               coordinates,
                               name_table,
                               street_name_suffix_table,
-                              intersection_generator)
+                              intersection_generator),
+          osm_node_ids(osm_node_ids)
     {
     }
 
@@ -53,7 +61,20 @@ class ValidationHandler final : public IntersectionHandler
     }
 
   private:
-    void checkForSharpTurnsOntoRamps(const NodeID,
+    // Prints: fromOsmId, viaOsmId, toOsmId, fromLocation, viaLocation, toLocation, angle
+    void printTurnInfo(const NodeID from, const NodeID via, const NodeID to, double angle) const
+    {
+        std::stringstream fmt;
+        fmt << osm_node_ids[from] << "," << osm_node_ids[via] << "," << osm_node_ids[to];
+        fmt << "," << coordinates[from] << "," << coordinates[via] << "," << coordinates[to];
+        fmt << "," << angle;
+
+        // Note: single operator<< cout call to not garble output running
+        // multi-threaded; no endl to not flush the stream after every turn
+        std::cout << fmt.str() << '\n';
+    }
+
+    void checkForSharpTurnsOntoRamps(const NodeID from_nid,
                                      const EdgeID via_eid,
                                      const Intersection &intersection) const
     {
@@ -69,16 +90,14 @@ class ValidationHandler final : public IntersectionHandler
 
             if (osrm::util::angularDeviation(0, road.angle) <= 2 * NARROW_TURN_ANGLE)
             {
-                const auto intersection_node_id = node_based_graph.GetTarget(via_eid);
-                const auto where = coordinates[intersection_node_id];
-
-                std::cout << ">>> " << road.angle << "," << where << std::endl;
+                const NodeID via_nid = node_based_graph.GetTarget(via_eid);
+                const NodeID to_nid = node_based_graph.GetTarget(road.eid);
+                printTurnInfo(from_nid, via_nid, to_nid, road.angle);
             }
         }
     }
 
-  private:
-    void checkForSharpTurnsBetweenRamps(const NodeID,
+    void checkForSharpTurnsBetweenRamps(const NodeID from_nid,
                                         const EdgeID via_eid,
                                         const Intersection &intersection) const
     {
@@ -89,20 +108,20 @@ class ValidationHandler final : public IntersectionHandler
         {
             const auto &road = intersection[i];
 
-            bool road_is_link = node_based_graph.GetEdgeData(road.eid).road_classification.IsLinkClass();
+            bool road_is_link =
+                node_based_graph.GetEdgeData(road.eid).road_classification.IsLinkClass();
 
             if (!road.entry_allowed)
             {
                 continue;
             }
 
-
-            if (osrm::util::angularDeviation(0, road.angle) <= 2 * NARROW_TURN_ANGLE && edge_is_link && road_is_link)
+            if (osrm::util::angularDeviation(0, road.angle) <= 2 * NARROW_TURN_ANGLE &&
+                edge_is_link && road_is_link)
             {
-                const auto intersection_node_id = node_based_graph.GetTarget(via_eid);
-                const auto where = coordinates[intersection_node_id];
-
-                std::cout << ">>> " << road.angle << "," << where << std::endl;
+                const NodeID via_nid = node_based_graph.GetTarget(via_eid);
+                const NodeID to_nid = node_based_graph.GetTarget(road.eid);
+                printTurnInfo(from_nid, via_nid, to_nid, road.angle);
             }
         }
     }

@@ -15,11 +15,11 @@
 #include "extractor/guidance/turn_handler.hpp"
 #include "extractor/guidance/validation_handler.hpp"
 #include "extractor/packed_osm_ids.hpp"
-#include "extractor/query_node.hpp"
 #include "extractor/restriction_index.hpp"
 #include "extractor/suffix_table.hpp"
 
 #include "util/attributes.hpp"
+#include "util/coordinate.hpp"
 #include "util/name_table.hpp"
 #include "util/node_based_graph.hpp"
 

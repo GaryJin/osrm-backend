@@ -4,13 +4,16 @@
 #include "extractor/guidance/intersection.hpp"
 #include "extractor/guidance/intersection_generator.hpp"
 #include "extractor/guidance/intersection_handler.hpp"
+#include "extractor/guidance/road_classification.hpp"
 #include "extractor/packed_osm_ids.hpp"
 
 #include "util/coordinate.hpp"
 #include "util/name_table.hpp"
 #include "util/node_based_graph.hpp"
 
+#include <algorithm>
 #include <iostream>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -56,11 +59,30 @@ class ValidationHandler final : public IntersectionHandler
     {
         checkForSharpTurnsOntoRamps(nid, via_eid, intersection);
         checkForSharpTurnsBetweenRamps(nid, via_eid, intersection);
+        // checkForSharpTurnsOnFastRoads(nid, via_eid, intersection);
 
         return intersection;
     }
 
   private:
+    // Assumed high speed on this edge
+    bool isFastRoad(const EdgeID edge) const
+    {
+        const auto road_class = node_based_graph.GetEdgeData(edge).road_classification.GetClass();
+
+        const RoadPriorityClass::Enum fast_classes[] = {
+            RoadPriorityClass::MOTORWAY,
+            RoadPriorityClass::TRUNK,
+            RoadPriorityClass::PRIMARY,
+            RoadPriorityClass::SECONDARY,
+        };
+
+        const auto it = std::find(std::begin(fast_classes), std::end(fast_classes), road_class);
+        const auto is_fast_road = it != std::end(fast_classes);
+
+        return is_fast_road;
+    }
+
     // Prints: fromOsmId, viaOsmId, toOsmId, fromLocation, viaLocation, toLocation, angle
     void printTurnInfo(const NodeID from, const NodeID via, const NodeID to, double angle) const
     {
@@ -118,6 +140,36 @@ class ValidationHandler final : public IntersectionHandler
 
             if (osrm::util::angularDeviation(0, road.angle) <= 2 * NARROW_TURN_ANGLE &&
                 edge_is_link && road_is_link)
+            {
+                const NodeID via_nid = node_based_graph.GetTarget(via_eid);
+                const NodeID to_nid = node_based_graph.GetTarget(road.eid);
+                printTurnInfo(from_nid, via_nid, to_nid, road.angle);
+            }
+        }
+    }
+
+    void checkForSharpTurnsOnFastRoads(const NodeID from_nid,
+                                       const EdgeID via_eid,
+                                       const Intersection &intersection) const
+    {
+        // Turning from a slow road onto a slow or fast road might require a sharp turn
+        if (!isFastRoad(via_eid))
+        {
+            return;
+        }
+
+        // Index 0 is UTurn road
+        for (std::size_t i = 1; i < intersection.size(); ++i)
+        {
+            const auto &road = intersection[i];
+
+            // We care for possible turns from fast roads on fast roads
+            if (!road.entry_allowed)
+            {
+                continue;
+            }
+
+            if (osrm::util::angularDeviation(0, road.angle) <= 2 * NARROW_TURN_ANGLE)
             {
                 const NodeID via_nid = node_based_graph.GetTarget(via_eid);
                 const NodeID to_nid = node_based_graph.GetTarget(road.eid);

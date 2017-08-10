@@ -14,6 +14,7 @@
 #include "extractor/guidance/turn_classification.hpp"
 #include "extractor/guidance/turn_handler.hpp"
 #include "extractor/guidance/validation_handler.hpp"
+#include "extractor/packed_osm_ids.hpp"
 #include "extractor/query_node.hpp"
 #include "extractor/restriction_index.hpp"
 #include "extractor/suffix_table.hpp"
@@ -43,6 +44,7 @@ class TurnAnalysis
   public:
     TurnAnalysis(const util::NodeBasedDynamicGraph &node_based_graph,
                  const std::vector<util::Coordinate> &coordinates,
+                 const extractor::PackedOSMIDs &osm_node_ids,
                  const RestrictionMap &restriction_map,
                  const std::unordered_set<NodeID> &barrier_nodes,
                  const CompressedEdgeContainer &compressed_edge_container,

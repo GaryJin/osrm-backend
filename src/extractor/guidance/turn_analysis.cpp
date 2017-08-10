@@ -28,6 +28,7 @@ bool requiresAnnouncement(const EdgeData &from, const EdgeData &to)
 
 TurnAnalysis::TurnAnalysis(const util::NodeBasedDynamicGraph &node_based_graph,
                            const std::vector<util::Coordinate> &coordinates,
+                           const extractor::PackedOSMIDs &osm_node_ids,
                            const RestrictionMap &restriction_map,
                            const std::unordered_set<NodeID> &barrier_nodes,
                            const CompressedEdgeContainer &compressed_edge_container,

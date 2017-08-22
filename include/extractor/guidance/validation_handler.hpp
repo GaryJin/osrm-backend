@@ -8,6 +8,7 @@
 #include "extractor/packed_osm_ids.hpp"
 
 #include "util/coordinate.hpp"
+#include "util/guidance/name_announcements.hpp"
 #include "util/name_table.hpp"
 #include "util/node_based_graph.hpp"
 
@@ -30,6 +31,34 @@ class ValidationHandler final : public IntersectionHandler
 {
     const extractor::PackedOSMIDs &osm_node_ids;
 
+    struct TurnDiagnostic
+    {
+        NodeID from, via, to;
+        std::string handler;
+        std::string what;
+
+        auto as_tuple() const { return std::tie(from, via, to, handler, what); }
+
+        friend bool operator<(const TurnDiagnostic &lhs, const TurnDiagnostic &rhs)
+        {
+            return lhs.as_tuple() < rhs.as_tuple();
+        }
+
+        friend bool operator==(const TurnDiagnostic &lhs, const TurnDiagnostic &rhs)
+        {
+            return lhs.as_tuple() == rhs.as_tuple();
+        }
+    };
+
+    mutable std::vector<TurnDiagnostic> turn_diagnostics;
+    mutable std::mutex turn_diagnostics_lock;
+
+    template <typename F> auto sync_turn_diagnostics(F &&f) const
+    {
+        std::lock_guard<std::mutex> defer{turn_diagnostics_lock};
+        return std::forward<F>(f)(turn_diagnostics);
+    }
+
   public:
     ValidationHandler(const IntersectionGenerator &intersection_generator,
                       const util::NodeBasedDynamicGraph &node_based_graph,
@@ -46,7 +75,19 @@ class ValidationHandler final : public IntersectionHandler
     {
     }
 
-    ~ValidationHandler() override final = default;
+    ~ValidationHandler() override final
+    {
+        sync_turn_diagnostics([this](auto &diagnostics) {
+            std::sort(begin(diagnostics), end(diagnostics));
+            auto it = std::unique(begin(diagnostics), end(diagnostics));
+            diagnostics.erase(it, end(diagnostics));
+
+            for (auto &diag : diagnostics)
+            {
+                printTurnInfo(diag.from, diag.via, diag.to, diag.handler, diag.what);
+            }
+        });
+    }
 
     bool canProcess(const NodeID, const EdgeID, const Intersection &) const override final
     {
@@ -60,6 +101,7 @@ class ValidationHandler final : public IntersectionHandler
         checkForSharpTurnsOntoRamps(nid, via_eid, intersection);
         checkForSharpTurnsBetweenRamps(nid, via_eid, intersection);
         // checkForSharpTurnsOnFastRoads(nid, via_eid, intersection);
+        checkForSharpDualCarriagewayUturns(nid, via_eid, intersection);
 
         return intersection;
     }
@@ -83,13 +125,23 @@ class ValidationHandler final : public IntersectionHandler
         return is_fast_road;
     }
 
-    // Prints: fromOsmId, viaOsmId, toOsmId, fromLocation, viaLocation, toLocation, angle
-    void printTurnInfo(const NodeID from, const NodeID via, const NodeID to, double angle) const
+    void printTurnInfo(const NodeID from,
+                       const NodeID via,
+                       const NodeID to,
+                       const std::string &handler,
+                       const std::string &what) const
     {
         std::stringstream fmt;
+        fmt << std::setprecision(12);
+
         fmt << osm_node_ids[from] << "," << osm_node_ids[via] << "," << osm_node_ids[to];
-        fmt << "," << coordinates[from] << "," << coordinates[via] << "," << coordinates[to];
-        fmt << "," << angle;
+        fmt << "," << util::toFloating(coordinates[from].lon) << ","
+            << util::toFloating(coordinates[from].lat);
+        fmt << "," << util::toFloating(coordinates[via].lon) << ","
+            << util::toFloating(coordinates[via].lat);
+        fmt << "," << util::toFloating(coordinates[to].lon) << ","
+            << util::toFloating(coordinates[to].lat);
+        fmt << ",\"" << handler << "\"," << what;
 
         // Note: single operator<< cout call to not garble output running
         // multi-threaded; no endl to not flush the stream after every turn
@@ -114,7 +166,14 @@ class ValidationHandler final : public IntersectionHandler
             {
                 const NodeID via_nid = node_based_graph.GetTarget(via_eid);
                 const NodeID to_nid = node_based_graph.GetTarget(road.eid);
-                printTurnInfo(from_nid, via_nid, to_nid, road.angle);
+
+                static const auto handler = "SharpTurnsOntoRamps";
+
+                sync_turn_diagnostics([&](auto &diagnostics) {
+                    TurnDiagnostic diag{
+                        from_nid, via_nid, to_nid, handler, std::to_string(road.angle)};
+                    diagnostics.push_back(std::move(diag));
+                });
             }
         }
     }
@@ -143,7 +202,14 @@ class ValidationHandler final : public IntersectionHandler
             {
                 const NodeID via_nid = node_based_graph.GetTarget(via_eid);
                 const NodeID to_nid = node_based_graph.GetTarget(road.eid);
-                printTurnInfo(from_nid, via_nid, to_nid, road.angle);
+
+                static const auto handler = "SharpTurnsBetweenRamps";
+
+                sync_turn_diagnostics([&](auto &diagnostics) {
+                    TurnDiagnostic diag{
+                        from_nid, via_nid, to_nid, handler, std::to_string(road.angle)};
+                    diagnostics.push_back(std::move(diag));
+                });
             }
         }
     }
@@ -173,8 +239,134 @@ class ValidationHandler final : public IntersectionHandler
             {
                 const NodeID via_nid = node_based_graph.GetTarget(via_eid);
                 const NodeID to_nid = node_based_graph.GetTarget(road.eid);
-                printTurnInfo(from_nid, via_nid, to_nid, road.angle);
+
+                static const auto handler = "SharpTurnsOnFastRoads";
+                sync_turn_diagnostics([&](auto &diagnostics) {
+                    TurnDiagnostic diag{
+                        from_nid, via_nid, to_nid, handler, std::to_string(road.angle)};
+                    diagnostics.push_back(std::move(diag));
+                });
             }
+        }
+    }
+
+    void checkForSharpDualCarriagewayUturns(const NodeID from_nid,
+                                            const EdgeID via_eid,
+                                            const Intersection &intersection) const
+    {
+        // Detect situations where dual-carriageway fans-in from two ways into one and
+        // the Uturn from a dual-carriageway onto the dual-carriageway should be possible.
+        //
+        // . .
+        //     > .
+        // . .
+        //
+
+        if (intersection.size() < 3)
+        {
+            return;
+        }
+
+        const auto &leftmost_road = intersection.getLeftmostRoad();
+        const auto &rightmost_road = intersection.getRightmostRoad();
+
+        if (!leftmost_road.entry_allowed || !rightmost_road.entry_allowed)
+        {
+            return;
+        }
+
+        const auto &via_road_data = node_based_graph.GetEdgeData(via_eid);
+        const auto &leftmost_road_data = node_based_graph.GetEdgeData(leftmost_road.eid);
+        const auto &rightmost_road_data = node_based_graph.GetEdgeData(rightmost_road.eid);
+
+        if (via_road_data.name_id == EMPTY_NAMEID || leftmost_road_data.name_id == EMPTY_NAMEID ||
+            rightmost_road_data.name_id == EMPTY_NAMEID)
+        {
+            return;
+        }
+
+        const auto via_road_low_prio_class =
+            via_road_data.road_classification.IsLowPriorityRoadClass();
+        const auto leftmost_road_low_prio_class =
+            leftmost_road_data.road_classification.IsLowPriorityRoadClass();
+        const auto rightmost_road_low_prio_class =
+            rightmost_road_data.road_classification.IsLowPriorityRoadClass();
+
+        if (via_road_low_prio_class || leftmost_road_low_prio_class ||
+            rightmost_road_low_prio_class)
+        {
+            return;
+        }
+
+        auto intersection_node_id = node_based_graph.GetTarget(via_eid);
+
+        const NodeID leftmost_to_nid = node_based_graph.GetTarget(leftmost_road.eid);
+        const NodeID rightmost_to_nid = node_based_graph.GetTarget(rightmost_road.eid);
+
+        const EdgeID leftmost_rev_eid =
+            node_based_graph.FindEdge(leftmost_to_nid, intersection_node_id);
+        const EdgeID rightmost_rev_eid =
+            node_based_graph.FindEdge(rightmost_to_nid, intersection_node_id);
+
+        if (leftmost_rev_eid == SPECIAL_EDGEID || rightmost_rev_eid == SPECIAL_EDGEID)
+        {
+            return;
+        }
+
+        const auto &leftmost_rev_data = node_based_graph.GetEdgeData(leftmost_rev_eid);
+        const auto &rightmost_rev_data = node_based_graph.GetEdgeData(rightmost_rev_eid);
+
+        if (!leftmost_rev_data.reversed || !rightmost_rev_data.reversed)
+        {
+            return;
+        }
+
+        const auto same_name_left =
+            !util::guidance::requiresNameAnnounced(via_road_data.name_id,
+                                                   leftmost_road_data.name_id,
+                                                   name_table,
+                                                   street_name_suffix_table);
+        const auto same_name_right =
+            !util::guidance::requiresNameAnnounced(via_road_data.name_id,
+                                                   rightmost_road_data.name_id,
+                                                   name_table,
+                                                   street_name_suffix_table);
+
+        if (!same_name_left || !same_name_right)
+        {
+            return;
+        }
+
+        const auto left_turn_angle = osrm::util::angularDeviation(0, leftmost_road.angle);
+        const auto right_turn_angle = osrm::util::angularDeviation(0, rightmost_road.angle);
+
+        const auto sharp_left_turn = left_turn_angle <= 2 * NARROW_TURN_ANGLE;
+        const auto sharp_right_turn = right_turn_angle <= 2 * NARROW_TURN_ANGLE;
+
+        static const auto handler = "SharpTurnsOnDualCarriageways";
+
+        if (sharp_left_turn)
+        {
+            sync_turn_diagnostics([&](auto &diagnostics) {
+                TurnDiagnostic diag{from_nid,
+                                    intersection_node_id,
+                                    leftmost_to_nid,
+                                    handler,
+                                    std::to_string(leftmost_road.angle)};
+                diagnostics.push_back(std::move(diag));
+            });
+        }
+
+        if (sharp_right_turn)
+        {
+            sync_turn_diagnostics([&](auto &diagnostics) {
+                TurnDiagnostic diag{from_nid,
+                                    intersection_node_id,
+                                    rightmost_to_nid,
+                                    handler,
+                                    std::to_string(rightmost_road.angle)};
+                diagnostics.push_back(std::move(diag));
+            });
         }
     }
 };
